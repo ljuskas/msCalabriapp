@@ -1,0 +1,54 @@
+# --- Java ---
+*.class
+*.log
+hs_err_pid*
+replay_pid*
+*.hprof
+
+# --- Maven ---
+target/
+.mvn/maven-home/
+.mvn/timing.properties
+# El wrapper "only-script" no necesita jar; si se añade uno, debe versionarse.
+
+# --- Gradle (por si se añade más adelante) ---
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# --- IDEs ---
+.idea/
+*.iml
+*.ipr
+*.iws
+/out/
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.sts4-cache/
+
+# --- Sistema operativo ---
+.DS_Store
+Thumbs.db
+
+# --- Secretos y configuración local ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+secrets/
+secret/
+application-local.properties
+config.local.*
+
+# --- Directorios de trabajo locales ---
+.work/
+.tools/
+tmp/
