@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clabriapp-postgres-smoke
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: clabriapp-postgres-smoke
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: verification
+spec:
+  # Pod efímero de verificación: no forma parte del despliegue de la aplicación.
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: psql
+      image: postgres:17.4
+      # La imagen se importa desde Docker local; nunca se hace pull de red.
+      imagePullPolicy: Never
+      command:
+        - sh
+        - -c
+        - psql -v ON_ERROR_STOP=1 -tAc 'SELECT current_database(), current_user;'
+      env:
+        - name: PGHOST
+          valueFrom:
+            secretKeyRef:
+              name: clabriapp-postgresql
+              key: host
+        - name: PGPORT
+          valueFrom:
+            secretKeyRef:
+              name: clabriapp-postgresql
+              key: port
+        - name: PGDATABASE
+          valueFrom:
+            secretKeyRef:
+              name: clabriapp-postgresql
+              key: database
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: clabriapp-postgresql
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: clabriapp-postgresql
+              key: password
+        # Laboratorio local sin TLS; no usar como configuración de producción.
+        - name: PGSSLMODE
+          value: disable
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi

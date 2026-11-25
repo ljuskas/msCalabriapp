@@ -54,6 +54,16 @@
             <artifactId>quarkus-smallrye-health</artifactId>
         </dependency>
 
+        <!--
+          Driver JDBC PostgreSQL y pool Agroal para el datasource de 23.5.
+          La versión la gestiona el quarkus-bom. No incluye Hibernate ORM ni Flyway:
+          los adaptadores, repositorios y migraciones son de la subtarea 23.9.
+        -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+
         <!-- Pruebas: JUnit 5 + REST Assured. -->
         <dependency>
             <groupId>io.quarkus</groupId>

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clabriapp-postgresql
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: clabriapp-postgresql
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: database-access
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      protocol: TCP
+      port: 5432
+      targetPort: 5432
+  # Sin selector: el destino se declara explícitamente en endpoints.yaml.
+  # No se crea un PostgreSQL dentro del clúster porque 23.5 reutiliza el
+  # contenedor existente del host (decisión de arquitectura aprobada).
