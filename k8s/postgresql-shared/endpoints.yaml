@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: clabriapp-postgresql
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: clabriapp-postgresql
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: database-access
+subsets:
+  - addresses:
+      # Gateway de la red Docker k3d-localemu-eks-clabriapp (172.28.0.0/16).
+      # Es una dirección del host, no una IP de pod. Si se recrea la red k3d,
+      # revisar el gateway y actualizar este valor (ver README.md).
+      - ip: 172.28.0.1
+    ports:
+      - name: postgresql
+        protocol: TCP
+        port: 5432
