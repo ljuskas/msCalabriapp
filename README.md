@@ -4,11 +4,11 @@ Microservicio base de **ClabriApp**. Este repositorio contiene el bootstrap téc
 subtarea **23.1**: una aplicación Quarkus con arquitectura hexagonal, endpoint de salud y
 pruebas base.
 
-> **Estado:** scaffold técnico **solo local** en la rama `feature/23-1-quarkus-bootstrap`,
-> **sin commit ni push**. El repositorio público `https://github.com/ljuskas/msCalabriapp`
-> ya existe y está conectado como `origin`, pero todavía **no tiene commits ni ramas
-> publicadas**. Es un esqueleto técnico, sin lógica de negocio de las tareas 23.6/23.7, sin
-> base de datos, sin autenticación, sin Docker, sin AWS y sin CI/CD.
+> **Estado:** el scaffold técnico de la subtarea **23.1** está integrado en `main` mediante
+> PR. La política de ramas y pull requests de la subtarea **23.2** está documentada en
+> [`CONTRIBUTING.md`](CONTRIBUTING.md), y `main` tiene protección activa en GitHub. Es un
+> esqueleto técnico, sin lógica de negocio de las tareas 23.6/23.7, sin base de datos, sin
+> autenticación, sin Docker, sin AWS y sin CI/CD.
 
 ## Propósito
 
@@ -215,13 +215,21 @@ correspondiente y actualizar esta sección.
 Los scripts de Maven Wrapper incluidos conservan su cabecera **Apache License 2.0**; esa
 licencia aplica al wrapper, no al código del producto.
 
-## Git
+## Contribución
 
-- Repositorio local inicializado en la rama `feature/23-1-quarkus-bootstrap`.
-- El scaffold está **solo en local**: **sin commit y sin push**.
-- El repositorio público `https://github.com/ljuskas/msCalabriapp` ya fue creado y está
-  conectado como `origin`.
-- El remoto **aún no tiene commits ni ramas publicadas**: está vacío.
-- El nombre definitivo del repositorio es `msCalabriapp`.
-- Publicar el scaffold queda **fuera del alcance de esta subtarea**; cuando se autorice,
-  sería `git add`, `git commit` y `git push -u origin feature/23-1-quarkus-bootstrap`.
+El flujo de trabajo completo está en [`CONTRIBUTING.md`](CONTRIBUTING.md). La rama `main`
+tiene protección activa en GitHub con este estado:
+
+- **PR obligatorio** hacia `main`; no se permite push directo.
+- **0 aprobaciones requeridas** (*required approving reviews* = 0), por decisión del único
+  mantenedor. GitHub no bloquea el merge por falta de aprobación, pero la **revisión manual
+  del diff y de las pruebas sigue siendo obligatoria** y debe quedar documentada en el PR.
+- **Conversaciones resueltas** antes del merge e **historial lineal**.
+- **Force push y borrado de `main` bloqueados**, también para administradores.
+- **Sin checks de estado requeridos** hasta la tarea CI 23.3.
+- El repositorio solo permite **Squash and merge**; merge commits y rebase están
+  deshabilitados como métodos de integración.
+
+La plantilla de PR está en [`.github/pull_request_template.md`](.github/pull_request_template.md).
+Las verificaciones automatizadas obligatorias se definirán en la tarea 23.3, cuando exista
+GitHub Actions; este repositorio todavía no incluye workflows de CI.
