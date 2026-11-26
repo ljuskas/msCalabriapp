@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mscalabriapp
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: mscalabriapp
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mscalabriapp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mscalabriapp
+        app.kubernetes.io/part-of: clabriapp
+        app.kubernetes.io/component: backend
+    spec:
+      # La aplicación no necesita hablar con la API de Kubernetes: no se monta
+      # el token de ServiceAccount. Se usa la ServiceAccount default sin token.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mscalabriapp
+          # El workflow sustituye __GITHUB_SHA__ por el SHA completo del commit
+          # publicado y aplica una copia temporal. La etiqueta sha es inmutable.
+          image: ghcr.io/ljuskas/mscalabriapp:sha-__GITHUB_SHA__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Mapeo explícito de las cinco claves del Secret existente. No se
+            # usa envFrom porque las claves no coinciden con los nombres DB_*.
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: clabriapp-postgresql
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: clabriapp-postgresql
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: clabriapp-postgresql
+                  key: database
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: clabriapp-postgresql
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clabriapp-postgresql
+                  key: password
+          # /health/started está expuesto por SmallRye Health en Quarkus 3.40.2
+          # (verificado en local con el artefacto empaquetado).
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          # Liveness no depende de PostgreSQL.
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness sí depende del datasource; sin PostgreSQL el pod no recibe
+          # tráfico, que es el comportamiento deseado.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # La imagen tiene rootfs de solo lectura; /tmp queda escribible y
+        # limitado para el runtime JVM/Quarkus.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

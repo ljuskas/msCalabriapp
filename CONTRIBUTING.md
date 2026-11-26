@@ -13,7 +13,7 @@ La rama `main` tiene **protección activa** en GitHub. La configuración vigente
 | Pull request obligatorio | **Activado**. No se permite push directo a `main`. |
 | Aprobaciones requeridas | **0** (*required approving reviews* = 0), por decisión del único mantenedor. GitHub no bloquea el merge por falta de aprobación. |
 | Revisión manual | **Obligatoria y documentada en el PR**, aunque GitHub no exija una aprobación formal. |
-| Checks de estado requeridos | **Ninguno** hasta la tarea CI 23.3. |
+| Checks de estado requeridos | **Pendiente de configurar en GitHub.** Los workflows de 23.3 están versionados, pero no se han ejecutado ni declarado como checks requeridos en este encargo. |
 | Conversaciones resueltas | **Obligatorio** resolverlas antes del merge. |
 | Historial lineal | **Obligatorio**. |
 | Force push | **Bloqueado**. |
@@ -179,13 +179,16 @@ Antes de fusionar, el autor y, cuando exista, el revisor deben comprobar:
 Pruebas de referencia del proyecto:
 
 ```bash
-./mvnw test
-./mvnw clean verify   # cuando el cambio lo justifique
+./mvnw -B -ntp verify
+docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -t mscalabriapp:local .
+./scripts/ci/smoke-image.sh mscalabriapp:local
 git diff --check      # espacios en blanco y conflictos sin resolver
 ```
 
-Los comandos y resultados reales deben quedar registrados en el PR. No se debe afirmar que
-una prueba pasó si no se ejecutó.
+El smoke de la imagen comprueba solo `/health/live` y `/api/v1/service-info`; no exige
+`/health/ready`, porque sin PostgreSQL el datasource está `DOWN`. Los comandos y resultados
+reales deben quedar registrados en el PR. No se debe afirmar que una prueba pasó si no se
+ejecutó.
 
 ## Pull request
 
@@ -267,27 +270,81 @@ futuro se incorpora un segundo revisor, se le podrá solicitar revisión volunta
 el número exigido sería una modificación de la configuración de GitHub, ajena a este
 documento.
 
-## Verificaciones automatizadas: hasta CI 23.3
+## CI/CD y despliegue (23.3)
 
-La protección de `main` **no exige checks de estado** en este momento. La tarea **23.3**
-configurará GitHub Actions y las verificaciones automatizadas obligatorias. Hasta entonces:
+Los workflows están **versionados en el repositorio**, pero en este encargo no se han
+ejecutado en GitHub, no se han configurado como checks requeridos, el runner no está
+registrado y el paquete GHCR no se ha publicado. No se deben inventar nombres de checks ni
+marcar casillas de CI como superadas.
 
-- No hay workflows de CI en este repositorio.
-- No hay checks automáticos requeridos que se puedan exigir o dar por superados.
-- No se deben inventar nombres de checks ni marcar casillas de CI en el PR.
-- El control vigente es la revisión manual del diff y la ejecución de pruebas.
+### Pull request hacia `main`
 
-Cuando existan workflows, se definirán los checks requeridos y este documento se actualizará
-para indicar cuáles son obligatorios y cómo se reflejan en el PR.
+- Workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+- Se dispara con `pull_request` hacia `main` y con `push` a `main`.
+- Todos los jobs usan `ubuntu-latest` (**GitHub-hosted**). No hay ningún job self-hosted,
+  no se usa `pull_request_target` y no se reciben secretos.
+- Pasos: `./mvnw -B -ntp verify`, construcción de la imagen JVM y smoke sin PostgreSQL
+  contra `/health/live` y `/api/v1/service-info`.
+- Un PR de fork se queda en build/test sobre runner GitHub-hosted. **Un PR no despliega y
+  no accede al clúster.**
+
+### Push/merge a `main`
+
+- Workflow: [`.github/workflows/publish-deploy.yml`](.github/workflows/publish-deploy.yml).
+- Solo se dispara con `push` a `main`; no tiene `workflow_dispatch`.
+- `publish` corre en GitHub-hosted, verifica, construye, prueba y publica en GHCR con el
+  `GITHUB_TOKEN` automático y la etiqueta inmutable `sha-${GITHUB_SHA}`. **No se usa ningún
+  PAT.**
+- `deploy` corre en el runner self-hosted con la etiqueta exacta `clabriapp-local-main`,
+  usa `kubectl` y el kubeconfig preinstalado en
+  `/etc/mscalabriapp-runner/kubeconfig`, y **no usa Docker ni el socket de Docker**.
+- El job `deploy` exige explícitamente repositorio `ljuskas/msCalabriapp`, evento `push` y
+  ref `refs/heads/main`.
+- Antes de tocar el clúster se hace un **preflight anónimo de GHCR**. Si el paquete es
+  privado o la imagen no está, el job falla con un mensaje que indica cambiar la
+  visibilidad y reintentar, sin aplicar nada.
+
+### Prerrequisitos operativos
+
+- Runner registrado con la etiqueta exacta `clabriapp-local-main`, `kubectl` y `curl`.
+- Kubeconfig fuera de Git en `/etc/mscalabriapp-runner/kubeconfig`, legible por el runner.
+- Bootstrap RBAC de [`k8s/bootstrap/`](k8s/bootstrap/) aplicado por el operador. Su Role no
+  concede `get` sobre Secrets; el job de despliegue comprueba con
+  `kubectl auth can-i get secrets -n clabriapp` que el kubeconfig tampoco pueda leerlos.
+- Paquete GHCR público. La visibilidad del paquete es independiente de la del repositorio;
+  la primera publicación puede crearlo privado. Cambiarlo en
+  `GitHub > Packages > mscalabriapp > Package settings > Change visibility > Public` y
+  volver a ejecutar el workflow.
+- Sin Docker ni socket de Docker en el runner de despliegue.
+
+### Permisos y acciones
+
+- Workflows con `permissions: contents: read`; solo el job de publicación añade
+  `packages: write`. La política de Actions del repositorio debe permitir ese permiso.
+- No se usan PAT ni secretos de GitHub para publicar.
+- No se crean Secrets de Kubernetes ni se versionan valores del Secret
+  `clabriapp-postgresql`.
+- Las acciones de terceros están fijadas a SHA oficiales comprobados:
+  `actions/checkout` v4.4.0 y `actions/setup-java` v4.9.1.
+
+### Reemplazo del texto anterior de `proyHerapp_v2/status.md`
+
+El texto antiguo que proponía previews por PR y despliegue desde el PR queda **reemplazado**:
+PR solo ejecuta CI en GitHub-hosted; el despliegue ocurre solo después del push/merge a
+`main`. No hay previews por PR ni namespaces efímeros. No se editó el otro repositorio.
 
 ## Seguridad y secretos
 
 - No se versionan contraseñas, tokens, claves privadas, certificados, cadenas de conexión
   con credenciales ni archivos `.env`.
+- No se versionan kubeconfigs, tokens de runner ni valores del Secret
+  `clabriapp-postgresql`. La publicación en GHCR usa solo el `GITHUB_TOKEN` automático, no
+  un PAT.
 - La configuración sensible se pasa por variables de entorno o mecanismos locales no
   versionados.
 - No se incluyen secretos en el código, las pruebas, la documentación, los mensajes de
   commit, la descripción del PR ni los logs.
+- No se ejecutan workflows de PR en runners self-hosted ni se exponen secretos a forks.
 - Si se detecta un secreto expuesto, no basta con borrar el archivo: hay que revocar o
   rotar la credencial, avisar al mantenedor y eliminar el secreto del historial de forma
   coordinada.
@@ -296,5 +353,10 @@ para indicar cuáles son obligatorios y cómo se reflejan en el PR.
 
 ## Referencias
 
-- [README.md](README.md): propósito, arranque y pruebas del proyecto.
+- [README.md](README.md): propósito, arranque, pruebas, imagen y CI/CD.
 - [.github/pull_request_template.md](.github/pull_request_template.md): plantilla de PR.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml): CI de PR y push.
+- [.github/workflows/publish-deploy.yml](.github/workflows/publish-deploy.yml): publicación
+  y despliegue desde `main`.
+- [k8s/app/](k8s/app/): Deployment y Service.
+- [k8s/bootstrap/](k8s/bootstrap/): RBAC del runner, no aplicado.

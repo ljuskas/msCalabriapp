@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# El namespace clabriapp ya existe y no se crea desde este directorio.
+# El bootstrap RBAC del runner está en k8s/bootstrap/ y no forma parte de esta
+# aplicación: no se aplica desde el workflow de despliegue.
+resources:
+  - deployment.yaml
+  - service.yaml

@@ -1,0 +1,7 @@
+# El contexto de Docker solo necesita el runtime generado por Maven y el
+# Dockerfile. Se excluyen .git, cachés, fuentes, documentación, manifiestos y
+# cualquier otro archivo que no forme parte de target/quarkus-app.
+*
+!Dockerfile
+!target/quarkus-app
+!target/quarkus-app/**

@@ -1,14 +1,275 @@
-# Plan de trabajo — 23.5 PostgreSQL compartido
+# Plan de trabajo — 23.3 CI/CD, imagen JVM y despliegue LocalEmu
 
-**Rama:** `feature/23-5-postgresql-shared`
+**Rama:** `feature/23-3-ci-cd-localemu`, basada en `main` con el PR #3 (23.5) integrado.
 **Fecha de verificación:** 2026-11-25
-**Alcance:** subtarea 23.5 con la arquitectura aprobada por el usuario, incluida la
-integración del datasource JDBC en la aplicación Quarkus.
-**Estado:** completa en el alcance aprobado, con las limitaciones documentadas abajo. El
-ORM, los repositorios/adaptadores y las migraciones quedan expresamente para 23.9. La
-entrega se registra en un único commit local con el mensaje aprobado, sin push, PR, merge
-ni rebase.
+**Alcance:** subtarea 23.3: CI en runners GitHub-hosted, publicación en GHCR con
+`GITHUB_TOKEN`, despliegue solo tras push a `main` en un runner self-hosted dedicado,
+imagen JVM Java 17, manifiestos de Deployment/Service y bootstrap RBAC del runner. La base
+23.5 ya integrada se conserva documentada en la Parte II.
+**Estado:** implementación versionable completa, aprobada y recogida en un commit local con el
+asunto `ci(deploy): añade CI en GitHub-hosted y despliegue seguro en LocalEmu`. No hubo push,
+PR ni merge; no se registró el runner, no se publicó ninguna imagen y no se aplicó nada al
+clúster (tampoco el bootstrap RBAC). No se incluye SHA porque el coordinador hará `amend` del
+mismo commit.
 **Mantenimiento:** este plan debe actualizarse en cada commit futuro de la rama.
+
+## Parte I — Tarea 23.3 (entrega actual)
+
+### A. Decisiones y límites del encargo
+
+El usuario aprobó:
+
+- un paquete **GHCR que debe ser público** para `msCalabriapp`;
+- un **runner nuevo dedicado** en este servidor para el despliegue;
+- la rama `feature/23-3-ci-cd-localemu`, basada en `main` con el PR #3 ya integrado.
+
+El encargo es solo la parte **versionable**. No se registró el runner, no se creó ni cambió
+ningún recurso de GitHub, no se publicó ninguna imagen, no se aplicó nada al clúster y no
+se leyeron valores del Secret `clabriapp-postgresql`. Tampoco se tocó
+`proyHerapp_v2/status.md` ni ningún archivo fuera de `msCalabriapp`.
+
+El texto antiguo de `proyHerapp_v2/status.md` que proponía un *namespace* de preview por PR
+y despliegue desde el PR queda **reemplazado** por este diseño:
+
+- **PR hacia `main`:** solo build, pruebas e imagen/smoke en runners GitHub-hosted. Nunca
+  self-hosted, nunca despliegue, nunca secretos.
+- **Push/merge a `main`:** publicación de la imagen desde un runner GitHub-hosted y, después,
+  despliegue en el runner self-hosted dedicado.
+- **Sin previews por PR.** No se comparte el entorno estable ni se crean namespaces
+  efímeros. La decisión anterior queda sin efecto para este repositorio.
+
+### B. CI en pull requests y push a `main`
+
+Workflow: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+
+- Se dispara con `pull_request` hacia `main` y con `push` a `main`.
+- Todos los jobs usan `ubuntu-latest` (GitHub-hosted). El workflow **no contiene ningún job
+  self-hosted**, no usa `pull_request_target` y no recibe secretos.
+- Pasos: `./mvnw -B -ntp verify`, `docker build` de la imagen JVM y smoke sin PostgreSQL.
+- Permisos: `contents: read`.
+- Concurrencia de CI con `cancel-in-progress: true` (no hay despliegues en este workflow).
+- Un PR de fork se queda en build/test sobre runner GitHub-hosted. No hay ningún camino
+  desde `pull_request` al runner dedicado ni al clúster.
+
+### C. Publicación en GHCR
+
+Workflow: [`.github/workflows/publish-deploy.yml`](../.github/workflows/publish-deploy.yml),
+job `publish`.
+
+- Se dispara **solo** con `push` a `main`; no hay `workflow_dispatch`.
+- Corre en `ubuntu-latest` (GitHub-hosted).
+- Permisos del job: `contents: read` y `packages: write`.
+- La política de Actions del repositorio debe permitir que el `GITHUB_TOKEN` solicite
+  `packages: write`; no se cambió en este encargo.
+- Autenticación con `${{ secrets.GITHUB_TOKEN }}`; **no se usa ningún PAT**.
+- Imagen: `ghcr.io/ljuskas/mscalabriapp:sha-${GITHUB_SHA}`.
+- Solo se publica la etiqueta inmutable `sha-<commit>`; no se publica `latest` ni otra
+  etiqueta mutable.
+- Antes de publicar repite `./mvnw -B -ntp verify`, construye la imagen y ejecuta el mismo
+  smoke sin PostgreSQL. La imagen que se publica es la que se probó en ese job.
+
+Acciones de terceros fijadas a SHA oficiales comprobados con `git ls-remote` contra los
+repositorios oficiales:
+
+| Acción | Versión | SHA fijado |
+| --- | --- | --- |
+| `actions/checkout` | v4.4.0 | `11d5960a326750d5838078e36cf38b85af677262` |
+| `actions/setup-java` | v4.9.1 | `cf277c60eb25467037889841efdb72551f06f6c3` |
+
+### D. Runner self-hosted y despliegue
+
+Job `deploy` del mismo workflow.
+
+- Runner: `runs-on: [self-hosted, clabriapp-local-main]`, con la etiqueta exacta
+  `clabriapp-local-main`.
+- Condiciones explícitas:
+  - `github.repository == 'ljuskas/msCalabriapp'`;
+  - `github.event_name == 'push'`;
+  - `github.ref == 'refs/heads/main'`.
+- Concurrencia del workflow: `cancel-in-progress: false`. Un push nuevo espera y no cancela
+  un despliegue en curso. Timeout del job: 15 minutos.
+- Usa `kubectl` y el kubeconfig preinstalado en
+  `/etc/mscalabriapp-runner/kubeconfig`. **No usa Docker ni el socket de Docker.**
+- Antes de tocar el clúster comprueba que existen `kubectl` y `curl`, que el kubeconfig es
+  legible y que el SHA tiene 40 caracteres hexadecimales.
+- **Preflight anónimo de GHCR** con
+  [`scripts/ci/preflight-ghcr.sh`](../scripts/ci/preflight-ghcr.sh): pide un token anónimo,
+  consulta el manifiesto de `sha-${GITHUB_SHA}` y exige `HTTP 200`. Se hace antes de
+  cualquier comando `kubectl` que hable con el clúster.
+- Si el paquete es privado (`401/403`) o la imagen no aparece (`404`), el job termina con
+  un mensaje claro que indica cambiar la visibilidad del paquete a pública y reintentar. No
+  se aplica nada al clúster.
+- Solo después del preflight comprueba el acceso al namespace existente `clabriapp`, copia
+  los YAML de `k8s/app/` a un directorio temporal, sustituye `__GITHUB_SHA__` por el SHA
+  real, aplica con `kubectl apply -k`, verifica la imagen del Deployment y espera el rollout.
+  También falla si `kubectl auth can-i get secrets -n clabriapp` responde `yes`: el
+  kubeconfig del runner debe corresponder a la ServiceAccount sin acceso a Secrets.
+
+#### Prerrequisito del runner
+
+El runner **no está registrado** en este encargo. Para habilitarlo hace falta:
+
+- etiqueta exacta `clabriapp-local-main`;
+- `kubectl` y `curl` instalados;
+- `KUBECONFIG=/etc/mscalabriapp-runner/kubeconfig` presente y legible por el usuario del
+  runner;
+- bootstrap RBAC de [`k8s/bootstrap/`](../k8s/bootstrap/) aplicado por el operador;
+- salida a `ghcr.io` para el preflight anónimo;
+- **sin Docker ni socket de Docker**.
+
+#### Prerrequisito de visibilidad de GHCR
+
+La visibilidad de un paquete de GHCR es independiente de la del repositorio. Un paquete
+nuevo puede nacer privado aunque el repositorio sea público. Antes del primer despliegue el
+operador debe cambiar la visibilidad:
+
+```text
+GitHub > Packages > mscalabriapp > Package settings > Change visibility > Public
+```
+
+El primer run de publicación puede terminar en el preflight si el paquete sigue privado;
+hay que cambiar la visibilidad y volver a ejecutar el workflow desde Actions. En este
+encargo no se publicó la imagen ni se cambió la visibilidad.
+
+### E. Imagen JVM y smoke
+
+- [`Dockerfile`](../Dockerfile): imagen de runtime basada en
+  `eclipse-temurin:17-jre-jammy`. No compila dentro de la imagen: copia
+  `target/quarkus-app/` generado por Maven.
+- Escucha en `0.0.0.0:8080` de forma explícita.
+- Usuario no-root `10001:10001`.
+- Sin Maven, fuentes, `.git` ni cachés.
+- [`.dockerignore`](../.dockerignore) excluye todo salvo `Dockerfile` y
+  `target/quarkus-app/`.
+- [`scripts/ci/smoke-image.sh`](../scripts/ci/smoke-image.sh) arranca el contenedor con
+  rootfs de solo lectura, `/tmp` en tmpfs, `--cap-drop ALL`, sin privilege escalation y
+  usuario `10001:10001`. Comprueba **solo** `/health/live` y `/api/v1/service-info`.
+  **No exige `/health/ready`**, porque el datasource está activo y sin PostgreSQL ese check
+  responde `DOWN`.
+
+### F. Manifiestos de Kubernetes y RBAC
+
+- [`k8s/app/deployment.yaml`](../k8s/app/deployment.yaml): Deployment en el namespace
+  existente `clabriapp`; no se crea `Namespace`.
+- [`k8s/app/service.yaml`](../k8s/app/service.yaml): Service `ClusterIP`, puerto 80 hacia
+  el puerto `http` (8080).
+- [`k8s/app/kustomization.yaml`](../k8s/app/kustomization.yaml): solo Deployment y Service.
+- Imagen con el marcador `ghcr.io/ljuskas/mscalabriapp:sha-__GITHUB_SHA__`; el workflow lo
+  sustituye por `GITHUB_SHA` en una copia temporal.
+- Las cinco claves del Secret se mapean explícitamente con `secretKeyRef`:
+  `host → DB_HOST`, `port → DB_PORT`, `database → DB_NAME`, `username → DB_USERNAME`,
+  `password → DB_PASSWORD`. No se usa `envFrom`, no se crea otro Secret y no se versiona
+  ningún valor.
+- Probes: `/health/started` (comprobado en local: SmallRye Health de Quarkus 3.40.2 lo
+  expone y respondió `200`), `/health/live` y `/health/ready`.
+- `securityContext`: no-root, `allowPrivilegeEscalation: false`,
+  `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile:
+  RuntimeDefault`, `automountServiceAccountToken: false`; `/tmp` con `emptyDir` en memoria.
+- Recursos: requests `100m`/`256Mi`; limits `500m`/`512Mi`.
+- [`k8s/bootstrap/deployer-rbac.yaml`](../k8s/bootstrap/deployer-rbac.yaml): ServiceAccount
+  `clabriapp-deployer`, Role y RoleBinding namespace-scoped para Deployment/Service y
+  lectura de pods/ReplicaSets. **No hay ninguna regla sobre Secrets**: el runner no tiene
+  `get` sobre Secrets. No se aplicó.
+- El bootstrap no se aplica desde el workflow de despliegue ni desde este encargo.
+
+### G. Documentación y reemplazo del texto anterior
+
+Se actualizan `README.md`, `CONTRIBUTING.md`, `.github/pull_request_template.md` y este
+plan con:
+
+- CI de PR en GitHub-hosted y despliegue solo después de `main`;
+- runner, etiqueta y prerrequisitos de kubeconfig/`kubectl`/`curl`;
+- GHCR, `GITHUB_TOKEN`, etiqueta `sha` y paso inicial de visibilidad;
+- permisos mínimos y RBAC sin acceso a Secrets;
+- comandos de verificación y riesgos.
+
+`proyHerapp_v2/status.md` **no se editó**. Su texto anterior de previews/deploy desde PR
+queda reemplazado por el diseño de esta rama: PR solo CI en GitHub-hosted; deploy solo
+después del push/merge a `main`.
+
+### H. Verificaciones ejecutadas y no ejecutadas
+
+Ejecutadas en el entorno del worker:
+
+- `./mvnw -B -ntp verify`: **BUILD SUCCESS**, 9 pruebas, 0 fallos, 0 errores, 0 omitidas.
+- `docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -t mscalabriapp:local .`:
+  **correcto**; imagen con `User=10001:10001`, puerto `8080` y entrypoint JVM.
+- `./scripts/ci/smoke-image.sh mscalabriapp:local`: **correcto**; `/health/live` `UP` y
+  `/api/v1/service-info` con `msCalabriapp`/`ClabriApp`, sin PostgreSQL.
+- Parseo de YAML de workflows y manifiestos con PyYAML: **correcto**.
+- Comprobación estructural de workflows: CI solo `ubuntu-latest`; deploy solo con etiqueta
+  `clabriapp-local-main` y condiciones de repositorio, `push` y `refs/heads/main`.
+- `git status --short --branch`: rama `feature/23-3-ci-cd-localemu`; solo aparecen los
+  archivos esperados de 23.3.
+- `git diff --check`: sin errores de espacios ni conflictos.
+- Revisión completa del diff y de los archivos nuevos. Escaneo de patrones de secretos
+  (claves privadas, PAT, tokens de GitHub/AWS/Slack, asignaciones de password/token): solo
+  aparecen nombres de claves, variables o placeholders; **ningún valor real**. No se
+  imprimieron coincidencias sensibles.
+- Sin archivos modificados fuera de `msCalabriapp` por este encargo.
+
+No disponibles en el worker (no se instalaron herramientas de sistema):
+
+- `actionlint`: **no disponible**.
+- `kubeconform`: **no disponible**.
+- `kubectl`: **no disponible** en el host.
+
+No ejecutadas, por límite explícito del encargo:
+
+- workflows en GitHub;
+- registro del runner;
+- publicación o descarga autenticada de la imagen;
+- aplicación de manifiestos o bootstrap RBAC al clúster;
+- lectura de valores del Secret.
+
+### I. Riesgos y límites
+
+1. **Primer despliegue bloqueado por visibilidad.** El paquete GHCR puede nacer privado.
+   El preflight fallará y no aplicará nada; hay que cambiar la visibilidad a pública y
+   reintentar. No se debe interpretar ese fallo como un fallo de la aplicación.
+2. **Runner no registrado.** El workflow de despliegue no puede ejecutarse hasta que exista
+   un runner con la etiqueta exacta y el kubeconfig en la ruta prevista.
+3. **Runner self-hosted y repositorio público.** Un runner self-hosted no debe quedar
+   expuesto a PR de forks. El diseño separa CI y deploy y no usa self-hosted en
+   `pull_request`, pero la configuración de GitHub debe exigir aprobación para workflows de
+   forks y limitar quién puede modificar workflows.
+4. **Kubeconfig y RBAC.** El kubeconfig es un secreto operativo fuera de Git; debe tener
+   permisos restringidos y rotación. El Role no concede Secrets, pero el operador debe
+   verificar con `kubectl auth can-i get secrets -n clabriapp` que el runner no los lee.
+5. **Etiqueta `sha` inmutable por convención.** Nadie debe sobrescribir
+   `sha-${GITHUB_SHA}`. No hay firma de imagen, SBOM ni verificación por digest en este
+   alcance; quedan para seguridad/observabilidad.
+6. **Dependencia de PostgreSQL compartido.** `/health/ready` depende del Service
+   `clabriapp-postgresql` y del gateway k3d. Si cambia la red o el gateway, el pod no estará
+   listo. Sin TLS y con el puerto 5432 expuesto, son límites ya documentados en 23.5.
+7. **Acciones fijadas a SHA.** Hay que revisar y actualizar los SHA periódicamente; no se
+   usan tags flotantes en los workflows.
+8. **Sin `workflow_dispatch`.** Los reintentos se hacen re-ejecutando el run desde Actions,
+   no con un disparador manual del workflow.
+9. **Read-only rootfs y `/tmp`.** El pod y el smoke usan rootfs de solo lectura con `/tmp`
+   en tmpfs. Si una futura versión de Quarkus necesita escribir en otra ruta, habrá que
+   añadir un volumen explícito, no relajar el rootfs.
+10. **Sin despliegue real en este encargo.** No se afirma que CI esté configurado en GitHub,
+    que el runner esté instalado, que el paquete sea público ni que el despliegue haya
+    ocurrido.
+11. **Imagen base por etiqueta.** `eclipse-temurin:17-jre-jammy` se referencia por tag, no
+    por digest. Para una cadena de suministro más estricta habría que fijar el digest y
+    añadir firma/procedencia; no forma parte de este alcance.
+
+### J. Mensaje del commit local creado
+
+El commit local fue aprobado y creado con este asunto:
+
+```text
+ci(deploy): añade CI en GitHub-hosted y despliegue seguro en LocalEmu
+
+Añade workflows de CI para pull_request y push a main con verify, imagen JVM y smoke sin base de datos. Publica en GHCR con GITHUB_TOKEN y etiqueta sha, y despliega solo tras push a main en un runner self-hosted dedicado con preflight anónimo de imagen. Incluye Deployment, Service y bootstrap RBAC sin acceso a Secrets; no registra el runner, no publica imágenes ni aplica recursos.
+```
+
+No se incluye SHA porque el coordinador hará `amend` del mismo commit. No hubo push, PR ni
+merge; no se registró el runner, no se publicó imagen ni se aplicó nada al clúster.
+
+## Parte II — Base integrada 23.5
 
 ## 1. Decisión aprobada
 
@@ -119,7 +380,8 @@ quarkus.datasource.devservices.enabled=false
   abre una conexión de validación y no ejecuta consultas sobre tablas ni filas.
 
 Mapeo de las claves del Secret a las variables de entorno. `envFrom` no renombra claves, por
-lo que el Deployment de 23.3 debe declarar cada variable con `secretKeyRef`:
+lo que el Deployment versionado en `k8s/app/deployment.yaml` declara cada variable con
+`secretKeyRef`:
 
 | Clave del Secret | Variable | Destino |
 | --- | --- | --- |
@@ -131,8 +393,8 @@ lo que el Deployment de 23.3 debe declarar cada variable con `secretKeyRef`:
 
 En el clúster, `DB_HOST` debe ser el valor del Secret (`host`), que apunta al Service
 `clabriapp-postgresql`. Para el smoke local se usa `DB_HOST=127.0.0.1`, porque el puerto
-`5432` del host está publicado. La app **no está desplegada**: el Deployment, la imagen y el
-CI son de 23.3.
+`5432` del host está publicado. La app **no está desplegada**: el Deployment, la imagen y los
+workflows están versionados en 23.3, pero no se aplicaron al clúster en este encargo.
 
 ## 4. Persistencia
 
@@ -311,8 +573,9 @@ heraap|clabriapp_app
    tarea de seguridad.
 5. **Sin ORM, repositorios ni migraciones.** El microservicio ya tiene driver JDBC y
    datasource validado, pero no tiene ORM, adaptadores/repositorios ni migraciones. La
-   persistencia de negocio sigue en 23.9. La aplicación **no está desplegada en EKS**: el
-   contenedor, la imagen y el CI son de 23.3; el clúster de estas pruebas es LocalEmu/k3s.
+   persistencia de negocio sigue en 23.9. La aplicación **no está desplegada**: la imagen y
+   los manifiestos de 23.3 están versionados, pero no se publicaron ni se aplicaron; el
+   clúster de estas pruebas es LocalEmu/k3s.
 6. **Persistencia sin prueba de reinicio.** No se reinició el contenedor compartido por el
    límite explícito de no tocar contenedores/volúmenes. La persistencia se respalda en el
    bind mount existente.
@@ -323,12 +586,13 @@ heraap|clabriapp_app
 9. **Imagen de prueba.** `postgres:17.4` se importó al clúster desde la imagen local de
    Docker; no se hizo `pull` de red. La imagen queda en el containerd del laboratorio.
 10. **Secret estándar de Kubernetes.** Es un `Opaque` (base64, no cifrado en reposo). El
-    acceso depende del RBAC del clúster; en 23.3/23.10 hay que restringir `get` al
-    ServiceAccount de la aplicación y revisar el cifrado en reposo si el entorno lo exige.
+    acceso depende del RBAC del clúster. El bootstrap de 23.3 no concede `get` sobre Secrets
+    al runner de despliegue; la aplicación consume el Secret vía kubelet con
+    `secretKeyRef`. Revisar el cifrado en reposo si el entorno lo exige.
 11. **Perfil `test` sin datasource.** Las pruebas unitarias no validan la conexión real
-    porque el datasource está inactivo. La conexión se validó en el smoke local; cuando
-    23.3 despliegue la app, el readiness del clúster deberá confirmar el mismo check. No se
-    debe interpretar el `UP` de `./mvnw test` como una prueba de red al PostgreSQL.
+    porque el datasource está inactivo. La conexión se validó en el smoke local; cuando se
+    despliegue la app, el readiness del clúster deberá confirmar el mismo check. No se debe
+    interpretar el `UP` de `./mvnw test` como una prueba de red al PostgreSQL.
 
 ## 8. Estado de 23.5 y aceptación
 
@@ -374,14 +638,13 @@ en el `status.md` central.
 
 ## 9. Tareas dependientes
 
-- **23.3 (CI/CD y Deployment):** el Secret no debe generarse en el workflow ni quedar en
-  logs. El runner debe provisionarlo fuera de Git. El Deployment debe inyectar las cinco
-  variables `DB_*` mediante `secretKeyRef` (las claves del Secret no coinciden con los
-  nombres de las variables). El ServiceAccount necesitará un `Role`/`RoleBinding` mínimo
-  para leer solo el Secret `clabriapp-postgresql` en el namespace; no hace falta un
-  `ClusterRole`. Si se aprueban previews por PR, no deben compartir el schema `clabriapp`
-  estable; necesitan schema/rol efímero o base efímera y limpieza. **La app no se despliega
-  en esta tarea ni en 23.5.**
+- **23.3 (CI/CD y Deployment):** implementado en esta rama como parte versionable. El
+  Secret no se genera en el workflow ni queda en logs; el kubeconfig del runner se
+  provisiona fuera de Git. El Deployment inyecta las cinco variables `DB_*` mediante
+  `secretKeyRef` (las claves del Secret no coinciden con los nombres de las variables). El
+  bootstrap RBAC es namespace-scoped y **no concede `get` sobre Secrets**; no hace falta un
+  `ClusterRole`. No hay previews por PR: PR solo CI en GitHub-hosted y deploy solo después
+  del push a `main`. **La app no se ha desplegado en este encargo.**
 - **23.6 (andamiaje Quarkus):** no requiere la base todavía; puede avanzar en paralelo.
 - **23.9 (persistencia y migraciones):** añadir ORM (si se aprueba), adaptadores y
   repositorios, Flyway o Liquibase, y pruebas Testcontainers. El driver y el datasource ya
@@ -411,14 +674,16 @@ en el `status.md` central.
 > Services desactivados. En `test` el datasource está inactivo; el smoke local con
 > `DB_HOST=127.0.0.1` y credenciales del Secret en memoria devolvió `/health/ready` 200 con
 > `Database connections health check` `UP`, sin consultar tablas ni escribir en la base. No
-> hay ORM, repositorios ni migraciones (23.9); la app no está desplegada en EKS (contenedor/CI
-> 23.3). Límites: sin TLS, sin migración, `5432` expuesto en el host y `USAGE` heredada sobre
-> `public` sin acceso a datos. La entrega queda en un único commit local con el mensaje
-> aprobado; no se hizo push, PR, merge ni rebase.
+> hay ORM, repositorios ni migraciones (23.9); la app no está desplegada y los manifiestos e
+> imagen de 23.3 están versionados, no aplicados. Límites: sin TLS, sin migración, `5432`
+> expuesto en el host y `USAGE` heredada sobre `public` sin acceso a datos. La entrega de
+> 23.5 queda en un único commit local con el mensaje aprobado; no se hizo push, PR, merge ni
+> rebase.
 
-## 11. Mensaje de commit aprobado
+## 11. Mensaje de commit de 23.5 (histórico)
 
-El usuario aprobó este mensaje para el único commit local de la entrega 23.5:
+El usuario aprobó este mensaje para el único commit local de la entrega 23.5, ya integrado
+en `main` mediante el PR #3:
 
 ```text
 feat(db): conecta ClabriApp al PostgreSQL compartido

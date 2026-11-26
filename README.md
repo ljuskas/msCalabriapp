@@ -2,20 +2,21 @@
 
 Microservicio base de **ClabriApp**. Este repositorio contiene el bootstrap técnico de la
 subtarea **23.1**: una aplicación Quarkus con arquitectura hexagonal, endpoint de salud y
-pruebas base.
+pruebas base. Sobre `main` ya están integradas la política de ramas de **23.2** y la base
+de datos compartida de **23.5**. La subtarea **23.3** añade la parte versionable de
+CI/CD, imagen JVM, publicación en GHCR y despliegue en LocalEmu.
 
-> **Estado:** el scaffold técnico de la subtarea **23.1** está integrado en `main` mediante
-> PR. La política de ramas y pull requests de la subtarea **23.2** está documentada en
-> [`CONTRIBUTING.md`](CONTRIBUTING.md), y `main` tiene protección activa en GitHub. La
-> subtarea **23.5** deja preparado el acceso al PostgreSQL compartido del host mediante un
-> schema y un rol aislados, un Service/Endpoint de Kubernetes y un Secret fuera de Git.
-> Además, la aplicación Quarkus ya incluye el **driver JDBC PostgreSQL y el datasource
-> Agroal**, configurados por variables de entorno y con el health check de readiness. No
-> incluye ORM, repositorios ni migraciones: eso corresponde a la subtarea 23.9. Sigue
-> siendo un esqueleto técnico, sin lógica de negocio de las tareas 23.6/23.7, sin
-> autenticación, sin imagen Docker de la aplicación, sin AWS y sin CI/CD.
+> **Estado:** el scaffold de **23.1**, la política de **23.2** (documentada en
+> [`CONTRIBUTING.md`](CONTRIBUTING.md)) y la integración de **23.5** están en `main`. La
+> aplicación incluye **driver JDBC PostgreSQL y datasource Agroal**, configurados por
+> variables de entorno. No incluye ORM, repositorios ni migraciones: eso corresponde a
+> **23.9**. La entrega de **23.3** deja **workflows, Dockerfile y manifiestos versionados**
+> en el árbol de trabajo de la rama `feature/23-3-ci-cd-localemu`, pero en este encargo **no
+> se ha registrado el runner, no se ha publicado ninguna imagen, no se ha desplegado nada,
+> no se ha aplicado RBAC al clúster y no se ha configurado CI en GitHub**. Tampoco se ha
+> cambiado la visibilidad del paquete GHCR y no se ha creado ningún commit.
 >
-> El detalle de la decisión, las verificaciones y los pendientes está en
+> El detalle de las decisiones, las verificaciones y los pendientes está en
 > [`docs/plan-trabajo.md`](docs/plan-trabajo.md).
 
 ## Propósito
@@ -39,7 +40,8 @@ SmallRye Health.
 | Maven | **No hace falta instalarlo**: se usa el Maven Wrapper versionado (`./mvnw`) |
 | Red | Acceso a **Maven Central** en la primera ejecución para descargar Maven y dependencias |
 | Utilidades | `bash`, `curl` o `wget`, y `unzip` para el wrapper |
-| Docker / AWS | **No requeridos** |
+| Docker | **Opcional** para desarrollo/pruebas; **necesario** solo para construir y probar la imagen JVM localmente |
+| AWS / kubectl | **No requeridos** para desarrollo. El despliegue usa un runner dedicado con `kubectl` y kubeconfig preinstalados (ver más abajo) |
 
 Versiones fijadas:
 
@@ -56,6 +58,11 @@ Versiones fijadas:
 - Maven Resources Plugin: `3.4.0`
 - Maven Clean Plugin: `3.4.1`
 - Maven Install / Deploy Plugin: `3.1.4`
+- Imagen base JVM: `eclipse-temurin:17-jre-jammy`
+- `actions/checkout`: `v4.4.0` fijada al SHA
+  `11d5960a326750d5838078e36cf38b85af677262`
+- `actions/setup-java`: `v4.9.1` fijada al SHA
+  `cf277c60eb25467037889841efdb72551f06f6c3`
 
 Se usa la última línea **3.x estable** de Quarkus (`3.40.2`) porque Quarkus 4 exige Java 21
 y el entorno disponible tiene Java 17. La versión se verificó contra Maven Central antes de
@@ -109,6 +116,129 @@ Para empaquetar y ejecutar el artefacto:
 ./mvnw package
 java -jar target/quarkus-app/quarkus-run.jar
 ```
+
+## Imagen JVM (subtarea 23.3)
+
+El [`Dockerfile`](Dockerfile) es una imagen **solo de runtime**. No compila dentro de la
+imagen: espera que `target/quarkus-app/` se haya generado antes con Maven. Usa
+`eclipse-temurin:17-jre-jammy`, escucha en `0.0.0.0:8080`, ejecuta como usuario no-root
+(`10001:10001`) y no incluye Maven, fuentes ni el `.git`.
+
+```bash
+./mvnw -B -ntp verify
+docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -t mscalabriapp:local .
+./scripts/ci/smoke-image.sh mscalabriapp:local
+```
+
+El smoke arranca el contenedor con rootfs de solo lectura, `/tmp` en tmpfs, sin
+capabilities y sin privilege escalation. Comprueba **solo** `/health/live` y
+`/api/v1/service-info`. **No exige `/health/ready`**: el datasource está activo y, sin
+PostgreSQL, readiness responde `DOWN`; eso es esperado y no es un fallo del smoke. El
+workflow de CI ejecuta exactamente ese script.
+
+`.dockerignore` excluye `.git`, cachés y todo el contenido que no sea el runtime
+`target/quarkus-app/`. La etiqueta `org.opencontainers.image.revision` se rellena con
+`GIT_SHA` cuando se pasa como `--build-arg`.
+
+## CI/CD (subtarea 23.3)
+
+Los workflows están versionados en el repositorio, pero **no se han ejecutado en GitHub ni
+se han configurado como checks requeridos** en este encargo.
+
+### Pull request hacia `main`
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) se dispara con `pull_request` y con
+`push` a `main`. Todos sus jobs usan `ubuntu-latest` (**GitHub-hosted**). Hace:
+
+1. `./mvnw -B -ntp verify`.
+2. `docker build` de la imagen JVM.
+3. Smoke sin PostgreSQL contra `/health/live` y `/api/v1/service-info`.
+
+Este workflow **no contiene ningún job self-hosted**, no usa `pull_request_target`, no
+recibe secretos y no despliega. Un PR de un fork se queda en build/test sobre runners
+GitHub-hosted.
+
+### Push/merge a `main`
+
+[`.github/workflows/publish-deploy.yml`](.github/workflows/publish-deploy.yml) se dispara
+**solo** con `push` a `main`; no tiene `workflow_dispatch`:
+
+1. `publish` corre en `ubuntu-latest` (GitHub-hosted), repite `verify`, construye y prueba
+   la imagen, y la publica en **GHCR** con `GITHUB_TOKEN` (`packages: write`) y la etiqueta
+   inmutable `sha-${GITHUB_SHA}`. **No se usa ningún PAT.** Solo se publica esa etiqueta;
+   no se publica `latest`.
+2. `deploy` corre en un runner **self-hosted** con la etiqueta exacta
+   `clabriapp-local-main`. Usa `kubectl` y el kubeconfig preinstalado en
+   `/etc/mscalabriapp-runner/kubeconfig`. **No usa Docker ni el socket de Docker.**
+3. Antes de tocar el clúster, `deploy` hace un **preflight anónimo** contra GHCR. Si el
+   paquete es privado o la imagen no está disponible, el job termina con un mensaje claro
+   y no aplica nada.
+
+El job `deploy` tiene condiciones explícitas de repositorio
+(`github.repository == 'ljuskas/msCalabriapp'`), evento (`github.event_name == 'push'`) y
+ref (`github.ref == 'refs/heads/main'`). La concurrencia del workflow es
+`cancel-in-progress: false`: un push nuevo espera y no cancela un despliegue en curso.
+
+### Prerrequisito: runner dedicado
+
+El runner **no está registrado** en este encargo. Para habilitarlo hace falta:
+
+- registrarlo con la etiqueta exacta `clabriapp-local-main`;
+- instalar `kubectl` y `curl`;
+- provisionar fuera de Git el kubeconfig en `/etc/mscalabriapp-runner/kubeconfig`,
+  legible por el usuario del runner y sin permisos de administrador;
+- aplicar el bootstrap RBAC de [`k8s/bootstrap/`](k8s/bootstrap/) (no aplicado aquí);
+- **no** instalar Docker ni montar el socket de Docker;
+- permitir salida a `ghcr.io` para el preflight anónimo.
+
+### Prerrequisito: visibilidad del paquete GHCR
+
+La visibilidad de un paquete de GHCR es **independiente** de la del repositorio. La primera
+publicación puede crear `mscalabriapp` como privado aunque el repositorio sea público. Antes
+del primer despliegue hay que cambiarlo a público:
+
+```text
+GitHub > Packages > mscalabriapp > Package settings > Change visibility > Public
+```
+
+Hasta entonces, el preflight anónimo falla y el despliegue no aplica nada. El primer run de
+`publish-deploy` puede terminar en ese punto; hay que cambiar la visibilidad y **volver a
+ejecutar el workflow** desde Actions. No se ha cambiado esa visibilidad en este encargo.
+
+### Permisos y secretos
+
+- Workflows con `permissions: contents: read`; solo `publish` añade `packages: write`.
+  La política de Actions del repositorio debe permitir solicitar ese permiso; no se cambió
+  en este encargo.
+- La publicación usa el `GITHUB_TOKEN` automático, nunca un PAT.
+- No hay secretos de Kubernetes ni valores del Secret en el repositorio.
+- El Deployment mapea las cinco claves del Secret existente con `secretKeyRef`; no crea
+  Secrets ni usa `envFrom`.
+- El bootstrap RBAC del runner no concede `get` sobre Secrets. Además, el job comprueba con
+  `kubectl auth can-i get secrets` que el kubeconfig usado no pueda leerlos y falla si
+  puede.
+- Las acciones de terceros están fijadas a SHA oficiales comprobados:
+  `actions/checkout` v4.4.0 y `actions/setup-java` v4.9.1.
+
+### Riesgos y pendientes
+
+- El primer despliegue puede fallar en el preflight si el paquete GHCR sigue privado; hay
+  que cambiar la visibilidad y reintentar.
+- El runner no está registrado y el kubeconfig no está instalado: el job `deploy` no puede
+  ejecutarse todavía.
+- Un runner self-hosted no debe quedar expuesto a PR de forks. GitHub debe exigir
+  aprobación para workflows de forks y limitar quién puede modificar workflows.
+- La etiqueta `sha` es inmutable por convención, no por firma ni por digest. No hay SBOM ni
+  firma de imagen en este alcance.
+- `/health/ready` depende del PostgreSQL compartido y del gateway k3d; sin base, el pod no
+  recibe tráfico aunque `/health/live` esté `UP`.
+- No hay `workflow_dispatch`: los reintentos se hacen re-ejecutando el run desde Actions.
+- La imagen base se referencia por tag, no por digest.
+
+Los manifiestos de la aplicación están en [`k8s/app/`](k8s/app/) y no se han aplicado al
+clúster. El antiguo texto de `proyHerapp_v2/status.md` que proponía previews o despliegue
+desde PR queda **reemplazado**: PR solo ejecuta CI en GitHub-hosted; el despliegue ocurre
+solo después del push/merge a `main`. No se editó el otro repositorio.
 
 ## PostgreSQL compartido (subtarea 23.5)
 
@@ -170,9 +300,9 @@ quarkus.datasource.devservices.enabled=false
 
 #### Variables de entorno y Secret
 
-Las claves del Secret `clabriapp-postgresql` **no** tienen el prefijo `DB_`. Hay que
-mapearlas explícitamente en el Deployment; `envFrom` no renombra claves. El mapeo previsto
-para cuando 23.3 despliegue el contenedor es:
+Las claves del Secret `clabriapp-postgresql` **no** tienen el prefijo `DB_`. El Deployment
+versionado en [`k8s/app/deployment.yaml`](k8s/app/deployment.yaml) las mapea explícitamente;
+`envFrom` no renombra claves. El mapeo es:
 
 | Clave del Secret | Variable de entorno | Uso en Quarkus |
 | --- | --- | --- |
@@ -182,7 +312,7 @@ para cuando 23.3 despliegue el contenedor es:
 | `username` | `DB_USERNAME` | `quarkus.datasource.username` |
 | `password` | `DB_PASSWORD` | `quarkus.datasource.password` |
 
-Ejemplo de mapeo explícito (no se aplica todavía; el Deployment es de 23.3):
+Ejemplo de mapeo explícito (idéntico al manifiesto versionado; **no aplicado** al clúster):
 
 ```yaml
 env:
@@ -220,9 +350,9 @@ puerto `5432` del PostgreSQL del host está publicado en loopback/interfaces loc
 Límites: no hay migración de datos, el login de Heraap sigue intacto, no hay TLS y el
 contenedor PostgreSQL existente publica `5432` en todas las interfaces del host (situación
 previa que no se modificó). La aplicación ya tiene driver y datasource, pero no ORM,
-adaptadores ni migraciones (23.9). **La aplicación no está desplegada en EKS**: la imagen,
-el contenedor y el CI corresponden a la subtarea 23.3; el clúster usado en estas pruebas es
-LocalEmu/k3s, no EKS real.
+adaptadores ni migraciones (23.9). **La aplicación no está desplegada**: los manifiestos,
+la imagen y los workflows están versionados, pero no se ha registrado el runner ni aplicado
+nada al clúster; el clúster usado en las pruebas de 23.5 es LocalEmu/k3s, no EKS real.
 
 ## Verificación ejecutada
 
@@ -274,6 +404,30 @@ Verificación de la integración de datasource (segunda fase de 23.5, 2026-11-25
 - El proceso Quarkus se detuvo al terminar y el puerto `18080` quedó libre. No se
   modificaron roles, schema, Secret, Service, Endpoints ni contenedores.
 
+Verificación de la parte versionable de 23.3 (2026-11-25, sin tocar GitHub ni el clúster):
+
+- `./mvnw -B -ntp verify`: **BUILD SUCCESS**; 9 pruebas, 0 fallos, 0 errores, 0 omitidas.
+- `docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -t mscalabriapp:local .`:
+  **correcto**. La imagen quedó con `User=10001:10001`, puerto `8080` y entrypoint JVM.
+- `./scripts/ci/smoke-image.sh mscalabriapp:local`: **correcto**; `/health/live` `UP` y
+  `/api/v1/service-info` con `msCalabriapp`/`ClabriApp`, sin PostgreSQL y sin exigir
+  `/health/ready`.
+- `/health/started` se comprobó con el artefacto empaquetado: SmallRye Health lo expone y
+  respondió `200`.
+- Parseo de los YAML de workflows y manifiestos con PyYAML: **correcto**. Comprobación
+  estructural: CI solo en `ubuntu-latest`; deploy solo con `clabriapp-local-main` y
+  condiciones de repositorio, evento `push` y `refs/heads/main`.
+- `git status --short --branch`: rama `feature/23-3-ci-cd-localemu`, solo los archivos
+  esperados de 23.3. `git diff --check`: sin errores.
+- Escaneo de patrones de secretos: solo nombres de claves, variables o placeholders; ningún
+  valor real. No se imprimieron coincidencias sensibles.
+- No se modificó ningún archivo fuera de `msCalabriapp` por este encargo.
+- `actionlint`, `kubeconform` y `kubectl` **no están disponibles** en el worker; no se
+  instalaron herramientas de sistema. Por eso no se ejecutó validación con esas herramientas
+  ni se aplicó nada al clúster.
+- No se registró el runner, no se publicó ninguna imagen, no se cambió la visibilidad de
+  GHCR, no se aplicó RBAC y no se ejecutaron los workflows en GitHub.
+
 ## Endpoints
 
 ### `GET /health`
@@ -324,11 +478,24 @@ curl -s http://localhost:8080/api/v1/service-info
 
 ```text
 .
+├── .dockerignore                  # Contexto mínimo para la imagen JVM
+├── .github/
+│   ├── pull_request_template.md
+│   └── workflows/
+│       ├── ci.yml                 # PR y push: build, pruebas e imagen (GitHub-hosted)
+│       └── publish-deploy.yml     # Push a main: GHCR + runner self-hosted
 ├── .mvn/wrapper/                  # Configuración del Maven Wrapper
-├── docs/plan-trabajo.md           # Decisiones y estado de la subtarea 23.5
-├── k8s/postgresql-shared/         # Service, Endpoints y smoke pod (sin Secret)
+├── Dockerfile                     # Runtime JVM Java 17 no-root
+├── docs/plan-trabajo.md           # Decisiones y estado de 23.3 y base 23.5
+├── k8s/
+│   ├── app/                       # Deployment, Service y kustomization
+│   ├── bootstrap/                 # RBAC del runner (no aplicado)
+│   └── postgresql-shared/         # Service, Endpoints y smoke pod (sin Secret)
 ├── mvnw / mvnw.cmd                # Wrapper (no requiere Maven global)
 ├── pom.xml
+├── scripts/ci/
+│   ├── preflight-ghcr.sh          # Pull anónimo antes de tocar el clúster
+│   └── smoke-image.sh             # Smoke sin PostgreSQL
 ├── src/main/java/com/clabriapp/mscalabriapp/
 │   ├── domain/model/              # Modelo puro (sin frameworks)
 │   ├── application/
@@ -392,11 +559,15 @@ Verificado en el entorno de la subtarea:
   permite repetir el build.
 - La base PostgreSQL compartida de 23.5 está provisionada y verificada; la aplicación ya
   incluye driver JDBC y datasource, pero no ORM, adaptadores/repositorios ni migraciones
-  (23.9). No se incluyen mensajería, autenticación, imagen Docker de la aplicación, AWS real
-  ni pipelines de CI/CD (23.3).
-- `kubectl` no está instalado en el host. Para 23.5 se usó el binario incluido en el
-  contenedor del servidor k3d (`docker exec ... kubectl`); el clúster es LocalEmu/k3s, no
-  EKS real.
+  (23.9). No se incluyen mensajería, autenticación ni AWS real. La imagen JVM, los workflows
+  y los manifiestos de 23.3 están versionados, pero no se publicaron ni se aplicaron al
+  clúster.
+- Docker **sí está disponible** en el worker (probado con Docker 29.10.1): se construyó y
+  ejecutó la imagen local. Para compilar fuera de este entorno puede hacer falta apuntar
+  `DOCKER_CONFIG` a un directorio escribible si `HOME` es de solo lectura.
+- `kubectl`, `actionlint` y `kubeconform` **no están instalados** en el host. Para 23.5 se
+  usó el binario `kubectl` incluido en el contenedor del servidor k3d; el clúster es
+  LocalEmu/k3s, no EKS real. En 23.3 no se ejecutó ningún comando contra el clúster.
 - La IP del Endpoints depende del gateway de la red k3d. Si se recrea esa red, revisar y
   actualizar `k8s/postgresql-shared/endpoints.yaml`. No se reinició el contenedor
   PostgreSQL compartido; la persistencia se comprobó por el bind mount existente.
@@ -426,10 +597,13 @@ tiene protección activa en GitHub con este estado:
   del diff y de las pruebas sigue siendo obligatoria** y debe quedar documentada en el PR.
 - **Conversaciones resueltas** antes del merge e **historial lineal**.
 - **Force push y borrado de `main` bloqueados**, también para administradores.
-- **Sin checks de estado requeridos** hasta la tarea CI 23.3.
+- **Sin checks de estado requeridos todavía.** Los workflows de 23.3 están versionados en
+  el repositorio, pero no se han ejecutado ni configurado como checks requeridos en GitHub
+  en este encargo.
 - El repositorio solo permite **Squash and merge**; merge commits y rebase están
   deshabilitados como métodos de integración.
 
 La plantilla de PR está en [`.github/pull_request_template.md`](.github/pull_request_template.md).
-Las verificaciones automatizadas obligatorias se definirán en la tarea 23.3, cuando exista
-GitHub Actions; este repositorio todavía no incluye workflows de CI.
+El flujo de CI/CD versionado se describe arriba y en [`CONTRIBUTING.md`](CONTRIBUTING.md);
+su activación en GitHub (runner, paquete público y checks requeridos) queda pendiente y no
+se debe dar por hecha.

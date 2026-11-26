@@ -1,0 +1,63 @@
+# Bootstrap RBAC para el runner de despliegue de msCalabriapp.
+#
+# NO se aplica en el encargo de la tarea 23.3: queda versionado para que el
+# operador lo revise y lo aplique cuando registre el runner dedicado.
+#
+# - ServiceAccount namespace-scoped: clabriapp-deployer.
+# - Role mínimo para aplicar Deployment/Service y consultar el rollout.
+# - Sin ninguna regla sobre Secrets: el runner no puede leer valores del Secret
+#   clabriapp-postgresql. La aplicación los consume vía kubelet con
+#   secretKeyRef, no con la ServiceAccount del deployer.
+# - Sin ClusterRole ni permisos sobre Namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clabriapp-deployer
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: clabriapp-deployer
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: ci-deployer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clabriapp-deployer
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: clabriapp-deployer
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: ci-deployer
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Deliberadamente no hay apiGroups: [""] resources: ["secrets"].
+  # Tampoco hay pods/log: el runner no necesita leer logs de la aplicación.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clabriapp-deployer
+  namespace: clabriapp
+  labels:
+    app.kubernetes.io/name: clabriapp-deployer
+    app.kubernetes.io/part-of: clabriapp
+    app.kubernetes.io/component: ci-deployer
+subjects:
+  - kind: ServiceAccount
+    name: clabriapp-deployer
+    namespace: clabriapp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: clabriapp-deployer
